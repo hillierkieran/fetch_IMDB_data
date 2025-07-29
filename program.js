@@ -6,74 +6,121 @@ import { createObjectCsvWriter as createCsvWriter } from 'csv-writer';
 
 const INPUT_FILE = 'input.csv';
 const OUTPUT_FILE = 'output.csv';
-const API_URL = 'https://rest.imdbapi.dev/v2/search/titles';
+const API_URL = 'https://rest.imdbapi.dev/v2';
+const API_SEARCH_URL = API_URL + '/search/titles?query={query}';
+const API_TITLE_URL = API_URL + '/titles/{id}';
 
-async function fetchIMDBData(title, year) {
+function fullResponse(response) {
+  const headers = {};
+  for (const [key, value] of response.headers.entries()) {
+    headers[key] = value;
+  }
+
+  return `Status: ${response.status}
+Status Text: ${response.statusText}
+URL: ${response.url}
+Headers: ${JSON.stringify(headers, null, 2)}
+Type: ${response.type}
+Redirected: ${response.redirected}`;
+}
+
+async function fetchIMDBData(title, year, id) {
+  const query = `${title} ${year && year !== 'N/A' ? year : ''}`.trim();
+  const url = id
+    ? API_TITLE_URL.replace('{id}', id)
+    : API_SEARCH_URL.replace('{query}', encodeURIComponent(query));
+
   try {
-    const query = `${title} ${year && year !== 'N/A' ? year : ''}`.trim();
-    const response = await fetch(`${API_URL}?query=${encodeURIComponent(query)}`, {
-      method: 'GET',
-    });
+    const maxAttempts = 3;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const response = await fetch(url, {
+        method: 'GET',
+      });
 
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
+      if (response.status === 429) { // Too many requests, wait before retrying
+        const retryAfterSeconds = response.headers.get('Retry-After');
+        const waitTimeSeconds = retryAfterSeconds ? parseInt(retryAfterSeconds) : 2 ** attempt; // Exponential backoff
+        console.warn(`Rate limit exceeded. Retrying after ${waitTimeSeconds} seconds...`);
+        await new Promise(resolve => setTimeout(resolve, waitTimeSeconds * 1000));
+        continue; // Retry the request
+      }
+
+      if (!response.ok) {
+        throw new Error(`${response.status} ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      return data?.titles?.[0]; // Take first match
     }
-
-    const data = await response.json();
-    return data?.titles?.[0]; // Take first match
+    throw new Error('Max attempts reached without a successful response');
   } catch (error) {
-    console.error(`Error fetching data for "${title}" (${year}):`, error);
+    console.error(`Error fetching data for "${title}" (${year}):\n${error}`);
     return null;
   }
+}
+
+function score(rating, votes) {
+  return Math.round((rating ** 4 * Math.log10(votes + 1) / 100));
 }
 
 (async () => {
   const results = [];
 
-  const readStream = createReadStream(INPUT_FILE).pipe(csv());
+  const input = createReadStream(INPUT_FILE).pipe(csv());
 
-  for await (const row of readStream) {
-    const { Title, Year, type: Type } = row;
-    console.log(`Fetching: ${Title} (${Year})`);
+  for await (const row of input) {
+    const { Title, Year, Type, Rating, Votes, ID } = row;
 
-    const imdbData = await fetchIMDBData(Title, Year);
+    let imdbData = null;
+    //console.log(`Fetching: ${Title} (${Year})`);
+    //imdbData = await fetchIMDBData(Title, Year, ID);
 
-    let type;
-    switch (imdbData?.type) {
+    let type = imdbData?.type || Type;
+    switch (type) {
       case 'movie':
+      case 'tvMovie':
         type = 'Movie';
         break;
       case 'tvMiniSeries':
       case 'tvMiniSeries':
-      case 'tv_special':
+      case 'tvShort':
+      case 'tvSpecial':
+      case 'tvSeries':
         type = 'TV Series';
         break;
       default:
-        type = imdbData?.type;
+        type = type || '';
     }
 
     results.push({
-      Title:  imdbData?.primary_title || Title,
-      Year:   imdbData?.start_year || Year,
-      Type:   type || Type,
-      Rating: imdbData?.rating?.aggregate_rating || '',
-      Votes:  imdbData?.rating?.votes_count || '',
-      Link:   imdbData?.id ? `https://www.imdb.com/title/${imdbData.id}/` : '',
+      title:  imdbData?.primary_title || Title,
+      year:   imdbData?.start_year || Year,
+      type:   type,
+      rating: imdbData?.rating?.aggregate_rating || Rating,
+      votes:  imdbData?.rating?.votes_count || Votes,
+      score:  score(imdbData?.rating?.aggregate_rating || Rating, imdbData?.rating?.votes_count || Votes),
+      id:     imdbData?.id || ID,
+      link:   imdbData?.id || ID ? `https://www.imdb.com/title/${imdbData?.id || ID}` : '',
     });
   }
 
-  const csvWriter = createCsvWriter({
+  // sort results by score descending
+  results.sort((a, b) => b.score - a.score);
+
+  const output = createCsvWriter({
     path: OUTPUT_FILE,
     header: [
-      { id: 'Title', title: 'Title' },
-      { id: 'Year', title: 'Year' },
-      { id: 'Type', title: 'Type' },
-      { id: 'Rating', title: 'Rating' },
-      { id: 'Votes', title: 'Votes' },
-      { id: 'Link', title: 'Link' },
+      { id: 'title', title: 'Title' },
+      { id: 'year', title: 'Year' },
+      { id: 'type', title: 'Type' },
+      { id: 'rating', title: 'Rating' },
+      { id: 'votes', title: 'Votes' },
+      { id: 'score', title: 'Score' },
+      { id: 'id', title: 'ID' },
+      { id: 'link', title: 'Link' },
     ]
   });
 
-  await csvWriter.writeRecords(results);
+  await output.writeRecords(results);
   console.log(`✅ Done! Output written to ${OUTPUT_FILE}`);
 })();
