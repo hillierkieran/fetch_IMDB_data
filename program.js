@@ -6,9 +6,9 @@ import { createObjectCsvWriter as createCsvWriter } from 'csv-writer';
 
 const INPUT_FILE = 'input.csv';
 const OUTPUT_FILE = 'output.csv';
-const API_URL = 'https://rest.imdbapi.dev/v2';
-const API_SEARCH_URL = API_URL + '/search/titles?query={query}';
-const API_TITLE_URL = API_URL + '/titles/{id}';
+const API_BASE_URL = 'https://api.imdbapi.dev';
+const API_SEARCH_URL = API_BASE_URL + '/search/titles?query={query}';
+const API_TITLE_URL = API_BASE_URL + '/titles/{id}';
 
 function fullResponse(response) {
   const headers = {};
@@ -50,7 +50,7 @@ async function fetchIMDBData(title, year, id) {
       }
 
       const data = await response.json();
-      return data?.titles?.[0]; // Take first match
+      return id ? data : data?.titles?.[0]; // Take first match
     }
     throw new Error('Max attempts reached without a successful response');
   } catch (error) {
@@ -63,17 +63,20 @@ function score(rating, votes) {
   return Math.round((rating ** 4 * Math.log10(votes + 1) / 100));
 }
 
+// Main processing
 (async () => {
   const results = [];
 
-  const input = createReadStream(INPUT_FILE).pipe(csv());
+  const inputData = createReadStream(INPUT_FILE).pipe(csv());
 
-  for await (const row of input) {
+  // Process each row in the input CSV
+  for await (const row of inputData) {
     const { Title, Year, Type, Rating, Votes, ID } = row;
 
+    // Fetch data from IMDB API
     let imdbData = null;
-    //console.log(`Fetching: ${Title} (${Year})`);
-    //imdbData = await fetchIMDBData(Title, Year, ID);
+    console.log(`Fetching: ${Title} (${Year})`);
+    imdbData = await fetchIMDBData(Title, Year, ID);
 
     let type = imdbData?.type || Type;
     switch (type) {
@@ -93,12 +96,12 @@ function score(rating, votes) {
     }
 
     results.push({
-      title:  imdbData?.primary_title || Title,
-      year:   imdbData?.start_year || Year,
+      title:  imdbData?.primaryTitle || Title,
+      year:   imdbData?.startYear || Year,
       type:   type,
-      rating: imdbData?.rating?.aggregate_rating || Rating,
-      votes:  imdbData?.rating?.votes_count || Votes,
-      score:  score(imdbData?.rating?.aggregate_rating || Rating, imdbData?.rating?.votes_count || Votes),
+      rating: imdbData?.rating?.aggregateRating || Rating,
+      votes:  imdbData?.rating?.voteCount || Votes,
+      score:  score(imdbData?.rating?.aggregateRating || Rating, imdbData?.rating?.voteCount || Votes),
       id:     imdbData?.id || ID,
       link:   imdbData?.id || ID ? `https://www.imdb.com/title/${imdbData?.id || ID}` : '',
     });
